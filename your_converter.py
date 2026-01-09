@@ -1,34 +1,24 @@
-# your_converter.py
-# OCR + mask + LaMa inpainting core logic
+# your_converter.py (no cv2 dependency)
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict
 
 import numpy as np
-import cv2
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from paddleocr import PaddleOCR  # PaddleOCR Python API [web:152]
-from simple_lama_inpainting import SimpleLama  # expects binary mask 255=inpaint [web:153][web:73]
+from paddleocr import PaddleOCR
+from simple_lama_inpainting import SimpleLama
 
 
 @dataclass
 class TextRegion:
-    # bbox: (x, y, w, h) in image pixel coordinates
     bbox: Tuple[int, int, int, int]
     text: str
     confidence: float
-    # quad: 4-point polygon from PaddleOCR (optional)
     quad: Optional[List[List[float]]] = None
 
 
 class EditableDocConverter:
-    """
-    Convert an image page into:
-    - clean background image (text removed by inpainting)
-    - list of OCR text regions for overlay (PPTX/HTML)
-    """
-
     def __init__(
         self,
         lang: str = "ch",
@@ -36,9 +26,8 @@ class EditableDocConverter:
         use_angle_cls: bool = True,
         min_confidence: float = 0.50,
     ):
-        # Initialize OCR once (downloads models on first run) [web:152]
-        self.ocr = PaddleOCR(use_angle_cls=use_angle_cls, lang=lang, use_gpu=use_gpu)  # [web:152]
-        self.inpainter = SimpleLama()  # [web:153]
+        self.ocr = PaddleOCR(use_angle_cls=use_angle_cls, lang=lang, use_gpu=use_gpu)
+        self.inpainter = SimpleLama()
         self.min_confidence = float(min_confidence)
 
     def process_document(
@@ -49,37 +38,22 @@ class EditableDocConverter:
         dilation_iter: int = 2,
         return_mask: bool = False,
     ):
-        """
-        Args:
-            image_path: input PNG/JPG
-            clean_image_path: if provided, save cleaned background
-            dilation_size: mask dilation kernel size (odd recommended)
-            dilation_iter: dilation iterations
-            return_mask: if True, also return mask image (PIL)
-
-        Returns:
-            clean_pil: PIL.Image (RGB)
-            text_regions: List[Dict] (serializable for Streamlit)
-            (optional) mask_pil: PIL.Image (L)
-        """
         image_pil = Image.open(image_path).convert("RGB")
         img_np = np.array(image_pil)
 
-        # 1) OCR detect + recognize [web:152]
-        ocr_result = self.ocr.ocr(img_np, cls=True)  # [web:152]
+        # OCR
+        ocr_result = self.ocr.ocr(img_np, cls=True)
         regions = self._extract_text_regions(ocr_result)
 
-        # 2) Create binary mask (255=inpaint) for LaMa [web:153][web:73]
-        mask_np = self._create_binary_mask(
-            img_shape=img_np.shape,
+        # Create mask (PIL version, no cv2)
+        mask_pil = self._create_binary_mask_pil(
+            img_size=image_pil.size,
             regions=regions,
-            dilation_size=dilation_size,
-            dilation_iter=dilation_iter,
+            padding=dilation_size,  # simple padding instead of morphological dilation
         )
-        mask_pil = Image.fromarray(mask_np).convert("L")
 
-        # 3) Inpaint
-        clean_pil = self.inpainter(image_pil, mask_pil)  # [web:153]
+        # Inpaint
+        clean_pil = self.inpainter(image_pil, mask_pil)
 
         if clean_image_path:
             clean_pil.save(clean_image_path)
@@ -99,25 +73,18 @@ class EditableDocConverter:
         return clean_pil, text_regions
 
     def _extract_text_regions(self, ocr_result) -> List[TextRegion]:
-        """
-        PaddleOCR result per line: [quad_points, (text, confidence)] [web:152]
-        """
         regions: List[TextRegion] = []
-
         if not ocr_result or not ocr_result[0]:
             return regions
 
         for line in ocr_result[0]:
-            quad = line[0]                 # 4 points polygon [web:152]
+            quad = line[0]
             text = line[1][0]
             conf = float(line[1][1])
 
-            if conf < self.min_confidence:
-                continue
-            if not text or not text.strip():
+            if conf < self.min_confidence or not text.strip():
                 continue
 
-            # Convert quad -> axis-aligned bbox
             xs = [p[0] for p in quad]
             ys = [p[1] for p in quad]
             x0, y0 = int(max(0, min(xs))), int(max(0, min(ys)))
@@ -132,36 +99,82 @@ class EditableDocConverter:
                     quad=[[float(p[0]), float(p[1])] for p in quad],
                 )
             )
-
         return regions
 
-    def _create_binary_mask(
+    def _create_binary_mask_pil(
         self,
-        img_shape: Tuple[int, int, int],
+        img_size: Tuple[int, int],
         regions: List[TextRegion],
-        dilation_size: int = 5,
-        dilation_iter: int = 2,
-    ) -> np.ndarray:
+        padding: int = 5,
+    ) -> Image.Image:
         """
-        Output: uint8 mask (H,W), 0 keep, 255 inpaint [web:153][web:73]
+        Create mask using PIL (no cv2 dependency)
+        padding: simple expand bbox by N pixels (replaces cv2 dilation)
         """
-        h, w = img_shape[:2]
-        mask = np.zeros((h, w), dtype=np.uint8)
+        w, h = img_size
+        mask = Image.new("L", (w, h), 0)
+        draw = ImageDraw.Draw(mask)
 
-        # Paint text regions white (255)
         for r in regions:
             x, y, bw, bh = r.bbox
-            x2 = min(w, x + bw)
-            y2 = min(h, y + bh)
-            cv2.rectangle(mask, (x, y), (x2, y2), 255, thickness=-1)
-
-        # Dilation to cover anti-aliased edges & shadows
-        k = int(max(1, dilation_size))
-        if k % 2 == 0:
-            k += 1  # make it odd
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-        iters = int(max(0, dilation_iter))
-        if iters > 0:
-            mask = cv2.dilate(mask, kernel, iterations=iters)
+            # expand bbox by padding
+            x0 = max(0, x - padding)
+            y0 = max(0, y - padding)
+            x1 = min(w, x + bw + padding)
+            y1 = min(h, y + bh + padding)
+            draw.rectangle([x0, y0, x1, y1], fill=255)
 
         return mask
+
+
+# ---- PPTX Exporter ----
+from pptx import Presentation
+from pptx.util import Inches, Pt
+
+
+class PPTXExporter:
+    def __init__(self, slide_width_in=13.333, slide_height_in=7.5):
+        self.prs = Presentation()
+        self.prs.slide_width = Inches(slide_width_in)
+        self.prs.slide_height = Inches(slide_height_in)
+
+    def add_slide_with_overlay(self, bg_image_path, text_regions):
+        blank_layout = self.prs.slide_layouts[6]
+        slide = self.prs.slides.add_slide(blank_layout)
+
+        img = Image.open(bg_image_path)
+        img_w, img_h = img.size
+        slide_w = self.prs.slide_width
+        slide_h = self.prs.slide_height
+
+        scale = max(slide_w / img_w, slide_h / img_h)
+        pic_w = int(img_w * scale)
+        pic_h = int(img_h * scale)
+        left = int((slide_w - pic_w) / 2)
+        top = int((slide_h - pic_h) / 2)
+
+        slide.shapes.add_picture(bg_image_path, left, top, pic_w, pic_h)
+
+        scale_x = slide_w / img_w
+        scale_y = slide_h / img_h
+
+        for r in text_regions:
+            x, y, w, h = r["bbox"]
+            text = r["text"]
+
+            tb = slide.shapes.add_textbox(
+                int(x * scale_x),
+                int(y * scale_y),
+                max(1, int(w * scale_x)),
+                max(1, int(h * scale_y)),
+            )
+            tf = tb.text_frame
+            tf.clear()
+            p = tf.paragraphs[0]
+            p.text = text
+
+            font_size = max(8, int(h * scale_y * 0.7))
+            p.font.size = Pt(font_size)
+
+            tb.line.fill.background()
+            tb.fill.backgrou
