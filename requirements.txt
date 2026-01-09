@@ -1,8 +1,9 @@
 streamlit==1.52.2
-paddleocr==2.7.3
-simple-lama-inpainting==0.1.1
 pillow==10.4.0
 python-pptx==1.0.2
 pdf2image==1.17.0
 numpy==1.26.4
 scipy==1.11.4
+torch==2.1.0
+torchvision==0.16.0
+paddlepaddle==2.6.1
