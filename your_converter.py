@@ -1,10 +1,11 @@
-# your_converter.py (no cv2 dependency)
+# your_converter.py (No OpenCV, uses scipy for dilation)
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw
+from scipy import ndimage
 
 from paddleocr import PaddleOCR
 from simple_lama_inpainting import SimpleLama
@@ -45,11 +46,12 @@ class EditableDocConverter:
         ocr_result = self.ocr.ocr(img_np, cls=True)
         regions = self._extract_text_regions(ocr_result)
 
-        # Create mask (PIL version, no cv2)
-        mask_pil = self._create_binary_mask_pil(
+        # Create mask with scipy dilation
+        mask_pil = self._create_binary_mask_scipy(
             img_size=image_pil.size,
             regions=regions,
-            padding=dilation_size,  # simple padding instead of morphological dilation
+            dilation_size=dilation_size,
+            dilation_iter=dilation_iter,
         )
 
         # Inpaint
@@ -101,30 +103,36 @@ class EditableDocConverter:
             )
         return regions
 
-    def _create_binary_mask_pil(
+    def _create_binary_mask_scipy(
         self,
         img_size: Tuple[int, int],
         regions: List[TextRegion],
-        padding: int = 5,
+        dilation_size: int = 5,
+        dilation_iter: int = 2,
     ) -> Image.Image:
         """
-        Create mask using PIL (no cv2 dependency)
-        padding: simple expand bbox by N pixels (replaces cv2 dilation)
+        Create mask using PIL + scipy dilation (no cv2 dependency)
         """
         w, h = img_size
         mask = Image.new("L", (w, h), 0)
         draw = ImageDraw.Draw(mask)
 
+        # Draw text regions
         for r in regions:
             x, y, bw, bh = r.bbox
-            # expand bbox by padding
-            x0 = max(0, x - padding)
-            y0 = max(0, y - padding)
-            x1 = min(w, x + bw + padding)
-            y1 = min(h, y + bh + padding)
-            draw.rectangle([x0, y0, x1, y1], fill=255)
+            draw.rectangle([x, y, x + bw, y + bh], fill=255)
 
-        return mask
+        # Morphological dilation using scipy
+        mask_np = np.array(mask, dtype=np.uint8)
+        
+        # Create square structuring element
+        structure = np.ones((dilation_size, dilation_size), dtype=np.uint8)
+        
+        # Apply dilation
+        for _ in range(dilation_iter):
+            mask_np = ndimage.binary_dilation(mask_np, structure=structure).astype(np.uint8) * 255
+
+        return Image.fromarray(mask_np)
 
 
 # ---- PPTX Exporter ----
@@ -177,4 +185,7 @@ class PPTXExporter:
             p.font.size = Pt(font_size)
 
             tb.line.fill.background()
-            tb.fill.backgrou
+            tb.fill.background()
+
+    def save(self, output_path):
+        self.prs.save(output_path)
