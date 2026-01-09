@@ -1,10 +1,9 @@
-# your_converter.py - 完整版本
+# your_converter.py - 完全無 OpenCV、無 scipy 版本
 
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 import numpy as np
-from PIL import Image, ImageDraw
-from scipy import ndimage
+from PIL import Image, ImageDraw, ImageFilter
 import easyocr
 from simple_lama_inpainting import SimpleLama
 
@@ -46,12 +45,11 @@ class EditableDocConverter:
         # OCR 識別
         regions = self._extract_text_regions(img_np)
 
-        # 創建 mask
-        mask_pil = self._create_binary_mask_scipy(
+        # 創建 mask（簡單 padding 方法，不用 scipy）
+        mask_pil = self._create_binary_mask_simple(
             img_size=image_pil.size,
             regions=regions,
-            dilation_size=dilation_size,
-            dilation_iter=dilation_iter,
+            padding=dilation_size,
         )
 
         # Inpainting
@@ -103,33 +101,30 @@ class EditableDocConverter:
             )
         return regions
 
-    def _create_binary_mask_scipy(
+    def _create_binary_mask_simple(
         self,
         img_size: Tuple[int, int],
         regions: List[TextRegion],
-        dilation_size: int = 5,
-        dilation_iter: int = 2,
+        padding: int = 5,
     ) -> Image.Image:
         """
-        創建二值 mask（用 scipy 做 dilation）
+        創建二值 mask（用簡單 padding 擴大，不用 scipy）
         """
         w, h = img_size
         mask = Image.new("L", (w, h), 0)
         draw = ImageDraw.Draw(mask)
 
-        # 繪製文字區域
+        # 繪製文字區域（加 padding）
         for r in regions:
             x, y, bw, bh = r.bbox
-            draw.rectangle([x, y, x + bw, y + bh], fill=255)
+            # 擴大範圍
+            x0 = max(0, x - padding)
+            y0 = max(0, y - padding)
+            x1 = min(w, x + bw + padding)
+            y1 = min(h, y + bh + padding)
+            draw.rectangle([x0, y0, x1, y1], fill=255)
 
-        # 用 scipy 做 morphological dilation
-        mask_np = np.array(mask, dtype=np.uint8)
-        structure = np.ones((dilation_size, dilation_size), dtype=np.uint8)
-
-        for _ in range(dilation_iter):
-            mask_np = ndimage.binary_dilation(mask_np, structure=structure).astype(np.uint8) * 255
-
-        return Image.fromarray(mask_np)
+        return mask
 
 
 # ---- PPTX Exporter ----
