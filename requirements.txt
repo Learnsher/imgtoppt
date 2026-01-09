@@ -1,7 +1,6 @@
-streamlit==1.52.2
+streamlit
 easyocr
-pillow==10.4.0
-python-pptx==1.0.2
-pdf2image==1.17.0
-numpy==1.26.4
-scipy==1.11.4
+pillow
+python-pptx
+pdf2image
+numpy
